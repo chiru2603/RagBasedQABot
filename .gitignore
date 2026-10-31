@@ -1,0 +1,11 @@
+.env
+.venv/
+data/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
