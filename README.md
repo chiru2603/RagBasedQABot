@@ -56,13 +56,120 @@ python -m governance_bot ingest --docs /path/to/approved-policies
 
 Ingestion errors leave the prior snapshot intact. An empty corpus is rejected to avoid accidental clearing. Source references are relative filenames and section/page labels, not enterprise URLs. `indexed_at` is index build time, not a policy's last-modified date. Content hashes are recorded for a later incremental-ingestion implementation. Changing the embedding model requires rebuilding the index.
 
+## Google Drive source connector
+
+The read-only Drive connector previews direct children of one configured folder.
+It does not recurse into subfolders or follow shortcuts. It supports Google Docs,
+UTF-8 text/Markdown, and text-based PDFs; other file types are excluded.
+These commands do not call OpenAI, change SQLite, or schedule ingestion.
+
+```bash
+python -m pip install -e ".[drive]"
+```
+
+For the initial service-account setup:
+
+1. Enable Google Drive API in your Google Cloud project.
+2. Create a dedicated service account and share the approved source folder with
+   its email address as a Viewer. Do not enable domain-wide delegation.
+3. Store its credential JSON outside the repository. Add these settings to `.env`:
+
+```dotenv
+GOOGLE_DRIVE_FOLDER_ID=16Efg8h0A7777FiF5ylKtDGGL16TsLjt1
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/outside/repo/google-drive-reader.json
+```
+
+The connector uses Application Default Credentials with the `drive.readonly`
+scope. Externally provisioned OAuth ADC credentials with that scope can also be
+used; this repo does not implement an interactive OAuth login flow. The chat's
+connected Drive plugin does not provision credentials for this standalone app.
+
+```bash
+python -m governance_bot sources list
+python -m governance_bot sources fetch DRIVE_FILE_ID
+python -m governance_bot sources list --folder-id ANOTHER_FOLDER_ID
+```
+
+Listing returns source/document IDs, titles, MIME types, original URLs, source
+modification times, versions, and checksums when Drive provides them. `complete`
+is emitted only after all pages succeed; errors and incomplete searches exit
+nonzero without publishing a partial listing. An empty accessible folder is a
+valid complete listing. Discovery is not a transactional snapshot of Drive;
+incremental sync checks a second complete listing before committing changes.
+
+Fetching verifies folder membership and download permission, downloads stored
+files or exports Google Docs as plain text, normalizes Unicode and line endings,
+and returns extracted text with its SHA-256 hash. Google Docs exports lose heading
+formatting in this initial version. Google limits exports to 10 MB. PDFs require
+extractable text; OCR is not provided. A metadata check after fetching rejects
+files changed or moved during extraction. Fetch output contains document text;
+do not redirect it into shared operational logs.
+
+Daily scheduling is a subsequent step. The existing `ingest --docs` command
+continues to rebuild the local-file index.
+
+API references: [files.list](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/list),
+[download and export](https://developers.google.com/workspace/drive/api/guides/manage-downloads).
+
+## Incremental Drive indexing
+
+After configuring the connector, sync into a dedicated index:
+
+```bash
+python -m governance_bot --db data/drive.sqlite sync
+python -m governance_bot --db data/drive.sqlite sync
+python -m governance_bot --db data/drive.sqlite search "How long does temporary access last?"
+python -m governance_bot --db data/drive.sqlite ask "How long does temporary access last?"
+```
+
+The first sync embeds the approved folder's documents. Subsequent syncs skip
+documents with unchanged metadata and a source version, timestamp, or checksum.
+Documents without those markers are fetched and hashed on every run. Changed
+documents are chunked again, but exact matching chunk text reuses stored vectors.
+Metadata-only edits update citations without new embeddings. Output reports
+added, updated, unchanged, removed, fetched, embedded/reused chunks, embedding
+calls, current document/chunk totals, and elapsed time. Updated counts include
+metadata-only edits; embedded chunk counts represent unique texts sent to the API.
+
+The `documents` table tracks `(source_id, document_id)`, source metadata, the full
+text hash, and document indexing time. Each chunk carries the same IDs, source
+URL, title, source modification date, section, and its own indexing time. Source
+update dates and indexing times are separate. Existing `ask` and `search`
+commands read this representation without a separate retrieval implementation.
+
+A sync takes a SQLite write reservation before discovery, prepares all changes,
+validates embeddings, and checks that a second complete source listing agrees
+before committing. Failures roll back the whole run, including planned removals.
+Concurrent writers fail with a database-locked error; retry after the active run.
+Readers can continue using the previous committed snapshot during preparation.
+Missing documents are removed only for the current source; an accessible empty
+folder confirmed twice removes that source's indexed documents. Drive listings
+are not transactional snapshots: stable omissions caused by access changes may
+also remove documents from the index. They are never deleted from Drive.
+
+Local snapshot ingestion and incremental sync intentionally cannot share an
+index. Keep `data/index.sqlite` for the existing local baseline and explicitly
+use `--db data/drive.sqlite` for Drive sync and Q&A. To change embedding model or
+chunking configuration, build a new database; incompatible vectors are rejected.
+No daily schedule is installed by this command. Failed runs are reported to
+stderr with a nonzero exit; persistent run history and notifications are deferred.
+
+Manual verification: sync twice and expect zero embeddings on the second run;
+add a disposable Markdown file, sync, edit one section, and sync again. Inspect
+SQLite and retrieved source excerpts for the changed text. Move the fixture into
+an excluded subfolder, sync, and verify only its indexed rows disappear. Keep
+the approved policy documents unchanged during this exercise.
+
 ## Offline verification
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Tests use a fake backend, no API key and no network. They check ranking/source mapping, missing or invented citations, abstention, replacement of old content, preservation after embedding failure, empty-input preservation, model mismatch and chunk boundaries. They do not establish real-model answer quality or OpenAI integration success. Live ingestion and Q&A were not executed in the generation environment because no API credentials were configured.
+Tests use fake backends, no API key and no network. They cover ranking, citations,
+abstention, chunk boundaries, connector pagination/failures, incremental updates,
+vector reuse, source-scoped removals, rollback, model mismatch, and writer locking.
+They do not establish real-model answer quality; run live verification separately.
 
 ## Manual quality checks
 
@@ -88,6 +195,8 @@ src/governance_bot/
   ingestion.py    # file parsing and heading-aware chunking
   providers.py    # OpenAI adapter and answer instructions
   retrieval.py    # index lifecycle, ranking and answer validation
+  sources.py      # read-only Google Drive connector
+  sync.py         # transactional incremental source indexing
 tests/            # network-free unit tests
 docs/             # fictional sample corpus
 evals/cases.json  # seed evaluation questions
