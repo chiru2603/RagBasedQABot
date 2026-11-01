@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["openai>=1.68,<3", "python-dotenv>=1,<2", "pypdf>=5,<7"]
 
 [project.optional-dependencies]
+drive = ["google-auth[requests]>=2.38,<3"]
 dev = ["build>=1,<2"]
 
 [project.scripts]

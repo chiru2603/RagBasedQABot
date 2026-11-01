@@ -13,6 +13,15 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     ingest = sub.add_parser('ingest')
     ingest.add_argument('--docs', default='docs')
+    sync = sub.add_parser('sync', help='Incrementally index the configured Google Drive folder')
+    sync.add_argument('--folder-id', help='Defaults to GOOGLE_DRIVE_FOLDER_ID')
+    sources = sub.add_parser('sources', help='Read-only Google Drive source previews')
+    actions = sources.add_subparsers(dest='source_action', required=True)
+    for action in ('list', 'fetch'):
+        p = actions.add_parser(action)
+        p.add_argument('--folder-id', help='Defaults to GOOGLE_DRIVE_FOLDER_ID')
+        if action == 'fetch':
+            p.add_argument('document_id')
     for command in ('ask', 'search', 'chat'):
         p = sub.add_parser(command)
         if command != 'chat':
@@ -23,8 +32,17 @@ def main():
     try:
         from dotenv import load_dotenv
         load_dotenv()
+        if args.command == 'sources':
+            from .sources import GoogleDriveSource, source_preview
+            source = GoogleDriveSource.from_environment(args.folder_id)
+            print(json.dumps(source_preview(source, getattr(args, 'document_id', None)), indent=2))
+            return 0
         rag = RAG(args.db, OpenAIBackend(), os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small'))
-        if args.command == 'ingest':
+        if args.command == 'sync':
+            from .sources import GoogleDriveSource
+            from .sync import sync_source
+            print(json.dumps(sync_source(rag, GoogleDriveSource.from_environment(args.folder_id)), indent=2))
+        elif args.command == 'ingest':
             print(json.dumps(rag.ingest(args.docs), indent=2))
         elif args.command == 'chat':
             print('Governance Q&A. Each question is independent. Type /quit to exit.')

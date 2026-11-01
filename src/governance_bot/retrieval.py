@@ -1,4 +1,5 @@
 import hashlib
+from contextlib import closing
 import json
 import math
 from pathlib import Path
@@ -47,9 +48,11 @@ class RAG:
         if any(len(v) != dimensions or not all(math.isfinite(x) for x in v) for v in vectors):
             raise ValueError('Invalid embedding dimensions or values')
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS chunks (payload TEXT, vector TEXT)')
+            if db.execute("SELECT value FROM metadata WHERE key='index_kind'").fetchone() == ('incremental',):
+                raise ValueError('Incremental index detected; use sync or a separate database for local ingest')
             # Replace the complete snapshot in one transaction, only after all API work succeeds.
             db.execute('DELETE FROM chunks')
             db.execute('DELETE FROM metadata')
@@ -64,14 +67,14 @@ class RAG:
             raise ValueError('top-k must be 1–10 and min-score must be -1–1')
         if not self.path.is_file():
             raise ValueError('Index missing; run ingest first')
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             metadata = dict(db.execute('SELECT key, value FROM metadata'))
             if metadata.get('embedding_model') != self.embedding_model:
                 raise ValueError('Embedding model changed; rebuild index with ingest')
             stored = db.execute('SELECT payload, vector FROM chunks').fetchall()
         query = self.backend.embed([question], self.embedding_model)[0]
         ranked = sorted([(cosine(query, json.loads(v)), json.loads(p)) for p, v in stored], key=lambda x: x[0], reverse=True)
-        return [dict(row, id=f'S{i}', score=score, indexed_at=metadata['indexed_at'])
+        return [dict(row, id=f'S{i}', score=score, indexed_at=row.get('indexed_at', metadata['indexed_at']))
                 for i, (score, row) in enumerate([r for r in ranked if r[0] >= min_score][:k], 1)]
 
     def ask(self, question, k=4, min_score=-1.0):
